@@ -1,6 +1,7 @@
 import os
 import json
 import subprocess
+import requests
 import yt_dlp
 from google import genai
 from google.genai import errors
@@ -9,6 +10,7 @@ from google.genai import errors
 # 1. CONFIGURATION & 19-CATEGORY TAXONOMY
 # ==========================================
 HISTORY_FILE = "posted_history.json"
+OUTPUT_DIR = "downloads"
 
 CATEGORIES = {
     "funny": ["laugh", "lol", "haha", "hilarious", "bro", "no way", "oh my god", "wtf", "why did", "i can't", "dead"],
@@ -56,7 +58,6 @@ def save_history(history):
 # 3. HYBRID CLASSIFICATION (SAVES API QUOTA)
 # ==========================================
 def classify_clip_locally(text: str):
-    """Scores text locally against categories to preserve Gemini free tier requests."""
     text_lower = text.lower()
     scores = {
         cat: sum(1 for kw in keywords if kw in text_lower)
@@ -69,7 +70,6 @@ def classify_content(title: str, description: str) -> str:
     combined_text = f"{title} {description}"
     category, score = classify_clip_locally(combined_text)
     
-    # If 2+ keywords match locally, skip Gemini API call completely!
     if score >= 2:
         print(f"⚡ Local keyword match: '{category}' (Score: {score}). Skipping Gemini API call.")
         return category
@@ -99,63 +99,148 @@ def classify_content(title: str, description: str) -> str:
 
 
 # ==========================================
-# 4. VIDEO PROCESSING (UNCROPPED TRIM)
+# 4. DYNAMIC TITLE & HASHTAG GENERATOR
 # ==========================================
-def download_and_trim_clip(video_url: str, start_sec: int, end_sec: int, output_filename: str = "clip.mp4"):
-    """
-    Downloads a specific time range from a YouTube video and trims it 
-    at its original resolution and aspect ratio without any cropping.
-    """
+def generate_metadata(original_title: str, category: str):
+    """Generates optimized titles with relevant hashtags for Shorts/Reels."""
+    base_tags = "#GTA6 #GrandTheftAuto6 #Shorts #Reels"
+    
+    category_tags = {
+        "police_chase": "#PoliceChase #GTA6Gameplay #Wanted",
+        "glitch": "#Glitch #GTA6Bugs #FunnyMoments",
+        "funny": "#Funny #GTA6Moments #Lol",
+        "stunt": "#Stunts #GTA6Stunts #Epic",
+        "clutch": "#Clutch #GamingMoments #Surviving",
+        "easter_egg": "#EasterEgg #Secrets #GTA6Secrets"
+    }
+    
+    cat_tag = category_tags.get(category, "#Gaming #Trending")
+    title = f"{original_title[:65]}... | GTA 6 #{category.capitalize()} #Shorts"
+    description = f"Insane GTA 6 moment captured! Category: {category.upper()}\n\n{base_tags} {cat_tag}"
+    
+    return title, description
+
+
+# ==========================================
+# 5. VIDEO PROCESSING & LOCAL SAVING (UNCRROPPED)
+# ==========================================
+def download_and_trim_clip(video_url: str, start_sec: int, end_sec: int, output_filename: str):
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    file_path = os.path.join(OUTPUT_DIR, output_filename)
     duration = end_sec - start_sec
     
     ydl_opts = {
         'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
-        'outtmpl': 'temp_source.mp4',
+        'outtmpl': os.path.join(OUTPUT_DIR, 'temp_source.mp4'),
         'quiet': True,
     }
 
-    print(f"📥 Downloading source video segment ({start_sec}s - {end_sec}s)...")
+    print(f"📥 Downloading source segment ({start_sec}s - {end_sec}s)...")
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([video_url])
 
-    print(f"✂️ Slicing segment without cropping or scaling...")
+    print(f"✂️ Trimming clip locally (uncropped resolution)...")
     ffmpeg_cmd = [
         "ffmpeg", "-y",
         "-ss", str(start_sec),
-        "-i", "temp_source.mp4",
+        "-i", os.path.join(OUTPUT_DIR, 'temp_source.mp4'),
         "-t", str(duration),
         "-c:v", "libx264",
         "-preset", "fast",
         "-crf", "22",
         "-c:a", "aac",
-        output_filename
+        file_path
     ]
     
     result = subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         raise RuntimeError(f"FFmpeg failed: {result.stderr.decode('utf-8')}")
     
-    print(f"✅ Successfully created uncropped clip: {output_filename}")
-    return output_filename
+    print(f"✅ Clip saved successfully to local path: {file_path}")
+    return file_path
 
 
 # ==========================================
-# 5. MAIN PIPELINE EXECUTION
+# 6. API UPLOAD STUBS (YOUTUBE & INSTAGRAM)
+# ==========================================
+def upload_to_youtube(file_path: str, title: str, description: str):
+    """Integration hook for YouTube Data API v3 Shorts upload."""
+    print(f"🚀 Uploading '{title}' to YouTube Shorts...")
+    # Add your google-api-python-client upload code here using youtube.videos().insert()
+    pass
+
+def upload_to_instagram(file_path: str, caption: str):
+    """Integration hook for Instagram Graph API Reels upload."""
+    print(f"🚀 Uploading clip to Instagram Reels...")
+    # Add your Meta Graph API container creation & publishing code here
+    pass
+
+
+# ==========================================
+# 7. MAIN PIPELINE EXECUTION
 # ==========================================
 def main():
-    print("🚀 Starting GTA 6 Automated Clipper Pipeline...")
+    print("🚀 Starting GTA 6 Automated Clipper & Downloader Pipeline...")
     history = load_history()
     
-    # Read configured source channel IDs from environment variable
-    source_channels = os.environ.get("SOURCE_YT_CHANNEL_IDS", "").split(",")
-    source_channels = [ch.strip() for ch in source_channels if ch.strip()]
-    
-    if not source_channels:
-        print("⚠️ No source channel IDs found in SOURCE_YT_CHANNEL_IDS environment variable.")
+    search_queries = ["GTA 6 gameplay highlights", "GTA VI funny moments"]
+    videos_to_process = []
+
+    ydl_search_opts = {
+        'extract_flat': True,
+        'max_downloads': 3,
+        'quiet': True,
+    }
+
+    print("🔍 Searching for fresh GTA 6 content...")
+    with yt_dlp.YoutubeDL(ydl_search_opts) as ydl:
+        for query in search_queries[:1]:
+            try:
+                search_results = ydl.extract_info(f"ytsearch3:{query}", download=False)
+                if 'entries' in search_results:
+                    for entry in search_results['entries']:
+                        video_id = entry.get('id')
+                        if video_id not in history:
+                            videos_to_process.append({
+                                'id': video_id,
+                                'url': f"https://www.youtube.com/watch?v={video_id}",
+                                'title': entry.get('title', 'GTA 6 Clip'),
+                                'description': entry.get('description', '')
+                            })
+            except Exception as e:
+                print(f"⚠️ Search error: {e}")
+
+    if not videos_to_process:
+        print("No new un-processed GTA 6 videos found in this cycle.")
         return
 
-    print(f"🔍 Scanning {len(source_channels)} source channels for new content...")
-    print("✨ Pipeline cycle completed successfully.")
+    # Process the top candidate
+    video = videos_to_process[0]
+    print(f"\nProcessing Video: {video['title']} ({video['url']})")
+    
+    category = classify_content(video['title'], video['description'])
+    title, description = generate_metadata(video['title'], category)
+    
+    print(f"🎯 Assigned Category: {category}")
+    print(f"📝 Generated Title: {title}")
+    
+    start_sec = 10
+    end_sec = 40
+    output_filename = f"gta6_{video['id']}_{category}.mp4"
+    
+    try:
+        local_file_path = download_and_trim_clip(video['url'], start_sec, end_sec, output_filename)
+        
+        # Trigger Uploads
+        upload_to_youtube(local_file_path, title, description)
+        upload_to_instagram(local_file_path, description)
+        
+        history.append(video['id'])
+        save_history(history)
+        print("✨ Pipeline cycle finished successfully!")
+        
+    except Exception as e:
+        print(f"❌ Pipeline execution failed: {e}")
 
 if __name__ == "__main__":
     main()
