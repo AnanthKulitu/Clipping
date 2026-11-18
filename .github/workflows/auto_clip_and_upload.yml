@@ -1,1 +1,6 @@
+name: Auto Clip & Upload GTA 6 Moments (4x Daily)
 
+on:
+  schedule:
+    - cron: '0 0,6,12,18 * * *'
+  workflow_dispatch:
