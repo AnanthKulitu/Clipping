@@ -40,21 +40,95 @@ CATEGORIES = [
     "clutch", "fail", "police_chase", "rage", "cry", "troll", "speedrun"
 ]
 
-CATEGORY_HASHTAGS = {
-    "funny": "#GTA6Funny #GTA6Moments #GamingMemes #GTAVI",
-    "stunt": "#GTA6Stunts #GTA6Wins #GamingClips #GTAVI",
-    "chaotic": "#GTA6Chaos #GTA6Mayhem #GTAVI #RockstarGames",
-    "weird": "#GTA6Weird #GTA6Physics #GTAVI #GamingFails",
-    "glitch": "#GTA6Glitch #GTA6Bugs #GTAVI #GameGlitches",
-    "beautiful": "#GTA6Graphics #GTA64K #ViceCity #GTAVI",
-    "clutch": "#GTA6Clutch #GamingClutch #GTAVI #ProGamer",
-    "fail": "#GTA6Fails #InstantKarma #GTAVI #GamingFails",
-    "police_chase": "#GTA6PoliceChase #5Stars #GTAVI #ViceCity",
-    "rage": "#GTA6Rage #StreamerRage #GTAVI #TwitchClips",
-    "cry": "#GTA6Story #GTA6Emotional #GTAVI #RockstarGames",
-    "troll": "#GTA6Troll #GTA6Online #GTAVI #GamingClips",
-    "speedrun": "#GTA6Speedrun #WorldRecord #GTAVI #Speedrunning"
+CATEGORIES = {
+    "funny": [
+        "laugh", "lol", "haha", "hilarious", "bro", "no way",
+        "oh my god", "wtf", "why did", "i can't", "dead"
+    ],
+    "weird": [
+        "weird", "what is happening", "what the", "npc",
+        "random", "cursed"
+    ],
+    "strange": [
+        "strange", "odd", "unexpected", "never seen", "how did"
+    ],
+    "chaotic": [
+        "chaos", "chaotic", "everyone", "run", "shooting",
+        "explosion", "crazy", "mayhem"
+    ],
+    "glitch": [
+        "glitch", "bug", "broken", "floating", "stuck", "teleport",
+        "disappeared", "physics"
+    ],
+    "beautiful": [
+        "beautiful", "look at this", "gorgeous", "amazing view"
+    ],
+    "trick": [
+        "tip", "trick", "how to", "easy", "you can", "did you know"
+    ],
+    "stunt": [
+        "stunt", "jump", "jumping", "flip", "land", "ramp",
+        "drift", "wheelie", "crazy jump"
+    ],
+    "clutch": [
+        "clutch", "1 hp", "one hp", "barely", "survived", "close call",
+        "how did i survive", "last second", "saved it"
+    ],
+    "fail": [
+        "fail", "failed", "wasted", "crashed", "ruined", "rip",
+        "instant karma", "messed up", "my bad", "worst"
+    ],
+    "police_chase": [
+        "police", "cops", "chase", "wanted", "five stars", "5 stars",
+        "swat", "sirens", "busted", "escape", "helicopter", "roadblock"
+    ],
+    "rage": [
+        "rage", "angry", "mad", "hate this game", "bullshit", "rigged",
+        "unfair", "screaming", "bro what", "are you kidding me"
+    ],
+    "cry": [
+        "cry", "crying", "sad", "heartbreaking", "emotional", "tears",
+        "tragic", "poor guy", "devastating"
+    ],
+    "troll": [
+        "troll", "trolling", "prank", "tricked", "baited", "got him",
+        "messing with", "funny reaction", "grief"
+    ],
+    "speedrun": [
+        "speedrun", "world record", "fast", "fastest", "shortcut",
+        "skip", "time save", "pb", "personal best", "optimize"
+    ],
+    "jumpscare": [
+        "scare", "jump scare", "what is that", "creepy",
+        "scary", "didn't see that", "ambush", "jumped"
+    ],
+    "easter_egg": [
+        "easter egg", "secret", "reference", "hidden", "detail",
+        "discovered", "found this", "developer", "mind blowing"
+    ],
+    "cinematic": [
+        "cinematic", "movie", "angle", "shot", "view",
+        "vibe", "aesthetic", "sunset", "lighting"
+    ],
+    "epic": [
+        "epic", "legendary", "insane", "god tier", "unbelievable",
+        "clean", "smooth", "pro", "masterpiece"
+    ],
 }
+
+# List of valid category names to pass directly into your Gemini prompt
+VALID_CATEGORY_NAMES = list(CATEGORIES.keys())
+
+
+def detect_category_from_text(text: str) -> str:
+    """Scores a transcript snippet against CATEGORIES and returns the best match."""
+    text_lower = text.lower()
+    scores = {
+        category: sum(1 for kw in keywords if kw in text_lower)
+        for category, keywords in CATEGORIES.items()
+    }
+    best_category = max(scores, key=scores.get)
+    return best_category if scores[best_category] > 0 else "epic"
 
 
 def load_history():
