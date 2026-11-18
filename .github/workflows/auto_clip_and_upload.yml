@@ -2,12 +2,11 @@ name: Auto Clip & Upload GTA 6 Moments (4x Daily)
 
 on:
   schedule:
-    # Runs 4 times per day at 00:00, 06:00, 12:00, and 18:00 UTC
     - cron: '0 0,6,12,18 * * *'
-  workflow_dispatch: # Allows manual 1-click test runs in GitHub Actions tab
+  workflow_dispatch:
 
 permissions:
-  contents: write # Needed to update posted_history.json and temporary release assets
+  contents: write
 
 jobs:
   clip-and-publish:
@@ -27,8 +26,10 @@ jobs:
         uses: AnimMouse/setup-yt-dlp@v3
 
       - name: Restore YouTube Cookies (Prevents Datacenter IP Blocks)
-        if: ${{ secrets.YOUTUBE_COOKIES_B64 != '' }}
-        run: echo "${{ secrets.YOUTUBE_COOKIES_B64 }}" | base64 -d > cookies.txt
+        if: env.YOUTUBE_COOKIES_B64 != ''
+        env:
+          YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
+        run: echo "$YOUTUBE_COOKIES_B64" | base64 -d > cookies.txt
 
       - name: Install Python Dependencies
         run: pip install -r requirements.txt
