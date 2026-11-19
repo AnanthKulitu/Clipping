@@ -5,12 +5,16 @@ import subprocess
 import yt_dlp
 from google import genai
 from google.genai import errors
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 
 # ==========================================
 # 1. CONFIGURATION & 19-CATEGORY TAXONOMY
 # ==========================================
 HISTORY_FILE = "posted_history.json"
-YOUTUBE_COOKIE_FILE = "cookies.txt"
+COOKIE_FILE = "cookies.txt"
 OUTPUT_DIR = "downloads"
 
 CATEGORIES = {
@@ -82,7 +86,6 @@ def classify_content(title: str, description: str) -> str:
     combined_text = f"{title or ''} {description or ''}".strip()
     local_category, score = classify_clip_locally(combined_text)
 
-    # Skip Gemini when 2+ local keywords match
     if score >= 2:
         print(f"⚡ Local keyword match: '{local_category}' (Score: {score}). Skipping Gemini API call.")
         return local_category
@@ -101,7 +104,6 @@ def classify_content(title: str, description: str) -> str:
         f"Return ONLY the category name."
     )
 
-    # Retry once on transient 503 high demand; fall back immediately on 429 or other errors
     for attempt in range(2):
         try:
             response = client.models.generate_content(
@@ -188,7 +190,6 @@ def download_and_trim_clip(video_url: str, start_sec: int, end_sec: int, output_
 
         actual_source = temp_source
         if not os.path.exists(actual_source):
-            # Fallback if yt-dlp appended an extension
             for ext in (".mp4", ".mkv", ".webm"):
                 candidate = f"{temp_source}{ext}"
                 if os.path.exists(candidate):
@@ -228,11 +229,54 @@ def download_and_trim_clip(video_url: str, start_sec: int, end_sec: int, output_
 
 
 # ==========================================
-# 6. UPLOAD HOOKS (YOUTUBE & INSTAGRAM)
+# 6. YOUTUBE & INSTAGRAM UPLOAD FUNCTIONS
 # ==========================================
-def upload_to_youtube(file_path: str, title: str, description: str) -> None:
-    """Placeholder hook for YouTube Data API v3 upload."""
-    print(f"📤 [YouTube Hook Ready] File: {file_path} | Title: {title}")
+def upload_to_youtube(file_path: str, title: str, description: str, privacy_status: str = "public") -> str | None:
+    """Uploads a video file to YouTube using OAuth2 refresh token credentials."""
+    client_id = os.environ.get("YT_CLIENT_ID", "").strip()
+    client_secret = os.environ.get("YT_CLIENT_SECRET", "").strip()
+    refresh_token = os.environ.get("YT_REFRESH_TOKEN", "").strip()
+
+    if not all([client_id, client_secret, refresh_token]):
+        print("ℹ️ YouTube OAuth secrets not set. Skipping YouTube upload.")
+        return None
+
+    creds = Credentials(
+        token=None,
+        refresh_token=refresh_token,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=client_id,
+        client_secret=client_secret,
+        scopes=["https://www.googleapis.com/auth/youtube.upload"],
+    )
+    creds.refresh(Request())
+
+    youtube = build("youtube", "v3", credentials=creds)
+
+    body = {
+        "snippet": {
+            "title": title[:100],
+            "description": description,
+            "tags": ["GTA6", "GrandTheftAuto6", "Shorts", "IndianGaming", "Gaming"],
+            "categoryId": "20",
+        },
+        "status": {
+            "privacyStatus": privacy_status,
+            "selfDeclaredMadeForKids": False,
+        },
+    }
+
+    media = MediaFileUpload(file_path, mimetype="video/mp4", chunksize=-1, resumable=True)
+    request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+
+    print(f"📤 Uploading '{title}' to YouTube...")
+    response = None
+    while response is None:
+        _, response = request.next_chunk()
+
+    video_id = response.get("id")
+    print(f"✅ Uploaded to YouTube! Video ID: {video_id} (https://youtu.be/{video_id})")
+    return video_id
 
 
 def upload_to_instagram(file_path: str, caption: str) -> None:
@@ -248,7 +292,6 @@ def main() -> None:
     history = load_history()
     seen_ids = set(history)
 
-    # Optional channel URLs/IDs from environment variable
     raw_channels = os.environ.get("SOURCE_YT_CHANNEL_IDS", "")
     channels = [c.strip() for c in raw_channels.split(",") if c.strip()]
 
@@ -263,7 +306,6 @@ def main() -> None:
     }
 
     with yt_dlp.YoutubeDL(ydl_search_opts) as ydl:
-        # 1. Check configured channels if provided
         for ch in channels:
             ch_url = ch if ch.startswith("http") else f"https://www.youtube.com/channel/{ch}/videos"
             try:
@@ -281,7 +323,6 @@ def main() -> None:
             except Exception as e:
                 print(f"⚠️ Channel fetch error ({ch}): {e}")
 
-        # 2. Fallback to YouTube search if no new channel videos found
         if not videos_to_process:
             for query in search_queries:
                 try:
