@@ -2,6 +2,7 @@ import os
 import json
 import time
 import subprocess
+import requests
 import yt_dlp
 from google import genai
 from google.genai import errors
@@ -14,7 +15,6 @@ from googleapiclient.http import MediaFileUpload
 # 1. CONFIGURATION & 19-CATEGORY TAXONOMY
 # ==========================================
 HISTORY_FILE = "posted_history.json"
-COOKIE_FILE = "cookies.txt"
 OUTPUT_DIR = "downloads"
 
 CATEGORIES = {
@@ -43,15 +43,8 @@ VALID_CATEGORY_NAMES = list(CATEGORIES.keys())
 
 
 # ==========================================
-# 2. COOKIES & HISTORY HELPERS
+# 2. HISTORY HELPERS
 # ==========================================
-def get_cookie_opts() -> dict:
-    """Returns yt-dlp cookiefile option only when cookies.txt exists and is non-empty."""
-    if os.path.exists(COOKIE_FILE) and os.path.getsize(COOKIE_FILE) > 0:
-        return {"cookiefile": COOKIE_FILE}
-    return {}
-
-
 def load_history() -> list:
     if os.path.exists(HISTORY_FILE):
         try:
@@ -69,10 +62,51 @@ def save_history(history: list) -> None:
 
 
 # ==========================================
-# 3. HYBRID CLASSIFICATION (SAVES API QUOTA)
+# 3. TWITCH HELIX API CLIENT
+# ==========================================
+def get_twitch_app_token(client_id: str, client_secret: str) -> str:
+    resp = requests.post(
+        "https://id.twitch.tv/oauth2/token",
+        params={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "grant_type": "client_credentials",
+        },
+        timeout=20,
+    )
+    resp.raise_for_status()
+    return resp.json()["access_token"]
+
+
+def get_twitch_game_id(client_id: str, token: str, game_name: str) -> str | None:
+    headers = {"Client-Id": client_id, "Authorization": f"Bearer {token}"}
+    resp = requests.get(
+        "https://api.twitch.tv/helix/games",
+        headers=headers,
+        params={"name": game_name},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    items = resp.json().get("data") or []
+    return items[0]["id"] if items else None
+
+
+def fetch_top_twitch_clips(client_id: str, token: str, game_id: str, limit: int = 10) -> list[dict]:
+    headers = {"Client-Id": client_id, "Authorization": f"Bearer {token}"}
+    resp = requests.get(
+        "https://api.twitch.tv/helix/clips",
+        headers=headers,
+        params={"game_id": game_id, "first": min(max(limit, 1), 100)},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    return resp.json().get("data") or []
+
+
+# ==========================================
+# 4. HYBRID CLASSIFICATION (SAVES API QUOTA)
 # ==========================================
 def classify_clip_locally(text: str) -> tuple[str, int]:
-    """Scores text locally against categories to preserve Gemini free tier requests."""
     text_lower = (text or "").lower()
     scores = {
         cat: sum(1 for kw in keywords if kw in text_lower)
@@ -82,8 +116,8 @@ def classify_clip_locally(text: str) -> tuple[str, int]:
     return best_category, scores[best_category]
 
 
-def classify_content(title: str, description: str) -> str:
-    combined_text = f"{title or ''} {description or ''}".strip()
+def classify_content(title: str, broadcaster: str = "") -> str:
+    combined_text = f"{title or ''} {broadcaster or ''}".strip()
     local_category, score = classify_clip_locally(combined_text)
 
     if score >= 2:
@@ -98,9 +132,9 @@ def classify_content(title: str, description: str) -> str:
     print(f"🤖 Low local score ({score}). Querying Gemini 3.8 Flash API...")
     client = genai.Client(api_key=api_key)
     prompt = (
-        f"Classify this GTA 6 video into exactly ONE of these categories: {', '.join(VALID_CATEGORY_NAMES)}.\n"
+        f"Classify this GTA 6 Twitch clip into exactly ONE of these categories: {', '.join(VALID_CATEGORY_NAMES)}.\n"
         f"Title: {title}\n"
-        f"Description: {description}\n"
+        f"Streamer: {broadcaster}\n"
         f"Return ONLY the category name."
     )
 
@@ -114,30 +148,27 @@ def classify_content(title: str, description: str) -> str:
             for valid_cat in VALID_CATEGORY_NAMES:
                 if valid_cat == raw_text or valid_cat in raw_text.split():
                     return valid_cat
-            print(f"⚠️ Unexpected Gemini category '{raw_text}'. Falling back to '{local_category}'.")
             return local_category
         except errors.APIError as e:
-            err_str = str(e)
-            if "503" in err_str and attempt == 0:
+            if "503" in str(e) and attempt == 0:
                 print("⚠️ Gemini 503 high demand. Retrying once in 3 seconds...")
                 time.sleep(3)
                 continue
-            print(f"⚠️ Gemini API error ({e}). Falling back to local category: '{local_category}'.")
+            print(f"⚠️ Gemini API error ({e}). Falling back to '{local_category}'.")
             return local_category
         except Exception as e:
-            print(f"⚠️ Unexpected error during Gemini call: {e}. Falling back to '{local_category}'.")
+            print(f"⚠️ Unexpected Gemini error: {e}. Falling back to '{local_category}'.")
             return local_category
 
     return local_category
 
 
 # ==========================================
-# 4. DYNAMIC TITLE & HASHTAG GENERATOR
+# 5. DYNAMIC TITLE & HASHTAG GENERATOR
 # ==========================================
-def generate_metadata(original_title: str, category: str) -> tuple[str, str]:
-    """Generates titles and descriptions with hashtags for Shorts/Reels and Indian gaming viewers."""
-    clean_title = " ".join((original_title or "GTA 6 Gameplay Moment").split())
-    base_tags = "#GTA6 #GrandTheftAuto6 #Shorts #Reels #IndianGaming #DesiGamer"
+def generate_metadata(original_title: str, broadcaster: str, category: str) -> tuple[str, str]:
+    clean_title = " ".join((original_title or "GTA 6 Twitch Clip").split())
+    base_tags = "#GTA6 #GrandTheftAuto6 #TwitchClips #Shorts #Reels #IndianGaming #DesiGamer"
 
     category_tags = {
         "police_chase": "#PoliceChase #GTA6Gameplay #Wanted",
@@ -153,26 +184,21 @@ def generate_metadata(original_title: str, category: str) -> tuple[str, str]:
     }
 
     cat_tag = category_tags.get(category, "#Gaming #Trending")
-    title = f"{clean_title[:65]} | GTA 6 #{category.replace('_', '').capitalize()} #Shorts"
+    title = f"{clean_title[:62]} | GTA 6 #{category.replace('_', '').capitalize()} #Shorts"
     description = (
-        f"GTA 6 {category.replace('_', ' ').title()} clip!\n\n"
+        f"GTA 6 {category.replace('_', ' ').title()} clip from Twitch streamer {broadcaster or 'creator'}!\n\n"
         f"{base_tags} {cat_tag}"
     )
     return title, description
 
 
 # ==========================================
-# 5. VIDEO PROCESSING & LOCAL SAVING (UNCROPPED)
+# 6. VIDEO DOWNLOAD & UNCROPPED TRIM
 # ==========================================
-def download_and_trim_clip(video_url: str, start_sec: int, end_sec: int, output_filename: str) -> str:
-    """Downloads a video segment and trims it at its original aspect ratio without cropping."""
-    if end_sec <= start_sec:
-        raise ValueError("end_sec must be greater than start_sec")
-
+def download_and_trim_clip(clip_url: str, output_filename: str, max_duration: int = 58) -> str:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     temp_source = os.path.join(OUTPUT_DIR, f"temp_{output_filename}")
     final_path = os.path.join(OUTPUT_DIR, output_filename)
-    duration = end_sec - start_sec
 
     ydl_opts = {
         "format": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
@@ -180,13 +206,12 @@ def download_and_trim_clip(video_url: str, start_sec: int, end_sec: int, output_
         "merge_output_format": "mp4",
         "quiet": True,
         "no_warnings": True,
-        **get_cookie_opts(),
     }
 
     try:
-        print(f"📥 Downloading source video ({start_sec}s to {end_sec}s)...")
+        print(f"📥 Downloading Twitch clip: {clip_url}")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([video_url])
+            ydl.download([clip_url])
 
         actual_source = temp_source
         if not os.path.exists(actual_source):
@@ -197,14 +222,13 @@ def download_and_trim_clip(video_url: str, start_sec: int, end_sec: int, output_
                     break
 
         if not os.path.exists(actual_source):
-            raise FileNotFoundError("Downloaded source video file was not found.")
+            raise FileNotFoundError("Downloaded Twitch clip file was not found.")
 
-        print("✂️ Trimming clip without cropping or scaling...")
+        print("✂️ Exporting clean MP4 without cropping or scaling...")
         ffmpeg_cmd = [
             "ffmpeg", "-y",
-            "-ss", str(start_sec),
             "-i", actual_source,
-            "-t", str(duration),
+            "-t", str(max_duration),
             "-c:v", "libx264",
             "-preset", "fast",
             "-crf", "22",
@@ -229,10 +253,9 @@ def download_and_trim_clip(video_url: str, start_sec: int, end_sec: int, output_
 
 
 # ==========================================
-# 6. YOUTUBE & INSTAGRAM UPLOAD FUNCTIONS
+# 7. UPLOAD HOOKS (YOUTUBE & INSTAGRAM)
 # ==========================================
 def upload_to_youtube(file_path: str, title: str, description: str, privacy_status: str = "public") -> str | None:
-    """Uploads a video file to YouTube using OAuth2 refresh token credentials."""
     client_id = os.environ.get("YT_CLIENT_ID", "").strip()
     client_secret = os.environ.get("YT_CLIENT_SECRET", "").strip()
     refresh_token = os.environ.get("YT_REFRESH_TOKEN", "").strip()
@@ -252,12 +275,11 @@ def upload_to_youtube(file_path: str, title: str, description: str, privacy_stat
     creds.refresh(Request())
 
     youtube = build("youtube", "v3", credentials=creds)
-
     body = {
         "snippet": {
             "title": title[:100],
             "description": description,
-            "tags": ["GTA6", "GrandTheftAuto6", "Shorts", "IndianGaming", "Gaming"],
+            "tags": ["GTA6", "GrandTheftAuto6", "TwitchClips", "IndianGaming", "Gaming"],
             "categoryId": "20",
         },
         "status": {
@@ -269,105 +291,76 @@ def upload_to_youtube(file_path: str, title: str, description: str, privacy_stat
     media = MediaFileUpload(file_path, mimetype="video/mp4", chunksize=-1, resumable=True)
     request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
 
-    print(f"📤 Uploading '{title}' to YouTube...")
     response = None
     while response is None:
         _, response = request.next_chunk()
 
     video_id = response.get("id")
-    print(f"✅ Uploaded to YouTube! Video ID: {video_id} (https://youtu.be/{video_id})")
+    print(f"✅ Uploaded to YouTube! Video ID: {video_id}")
     return video_id
 
 
 def upload_to_instagram(file_path: str, caption: str) -> None:
-    """Placeholder hook for Instagram Graph API upload."""
     print(f"📤 [Instagram Hook Ready] File: {file_path} | Caption lines: {len(caption.splitlines())}")
 
 
 # ==========================================
-# 7. MAIN PIPELINE EXECUTION
+# 8. MAIN PIPELINE EXECUTION
 # ==========================================
 def main() -> None:
-    print("🚀 Starting GTA 6 Automated Clipper & Downloader Pipeline...")
+    print("🚀 Starting Twitch GTA 6 Clipper Pipeline...")
+    twitch_client_id = os.environ.get("TWITCH_CLIENT_ID", "").strip()
+    twitch_client_secret = os.environ.get("TWITCH_CLIENT_SECRET", "").strip()
+    game_name = os.environ.get("TWITCH_GAME_NAME", "Grand Theft Auto VI").strip()
+
+    if not twitch_client_id or not twitch_client_secret:
+        raise RuntimeError("Missing TWITCH_CLIENT_ID or TWITCH_CLIENT_SECRET environment variables.")
+
     history = load_history()
     seen_ids = set(history)
 
-    raw_channels = os.environ.get("SOURCE_YT_CHANNEL_IDS", "")
-    channels = [c.strip() for c in raw_channels.split(",") if c.strip()]
+    token = get_twitch_app_token(twitch_client_id, twitch_client_secret)
+    game_id = get_twitch_game_id(twitch_client_id, token, game_name)
+    if not game_id:
+        print(f"⚠️ Twitch category '{game_name}' not found yet. Falling back to 'Grand Theft Auto V'.")
+        game_id = get_twitch_game_id(twitch_client_id, token, "Grand Theft Auto V")
 
-    search_queries = ["GTA 6 gameplay", "GTA VI funny moments"]
-    videos_to_process = []
-
-    ydl_search_opts = {
-        "extract_flat": True,
-        "quiet": True,
-        "no_warnings": True,
-        **get_cookie_opts(),
-    }
-
-    with yt_dlp.YoutubeDL(ydl_search_opts) as ydl:
-        for ch in channels:
-            ch_url = ch if ch.startswith("http") else f"https://www.youtube.com/channel/{ch}/videos"
-            try:
-                info = ydl.extract_info(ch_url, download=False)
-                entries = (info or {}).get("entries") or []
-                for entry in entries[:5]:
-                    vid = entry.get("id")
-                    if vid and vid not in seen_ids:
-                        videos_to_process.append({
-                            "id": vid,
-                            "url": entry.get("url") or f"https://www.youtube.com/watch?v={vid}",
-                            "title": entry.get("title") or "GTA 6 Clip",
-                            "description": entry.get("description") or "",
-                        })
-            except Exception as e:
-                print(f"⚠️ Channel fetch error ({ch}): {e}")
-
-        if not videos_to_process:
-            for query in search_queries:
-                try:
-                    results = ydl.extract_info(f"ytsearch5:{query}", download=False)
-                    entries = (results or {}).get("entries") or []
-                    for entry in entries:
-                        vid = entry.get("id")
-                        if vid and vid not in seen_ids:
-                            videos_to_process.append({
-                                "id": vid,
-                                "url": entry.get("webpage_url") or f"https://www.youtube.com/watch?v={vid}",
-                                "title": entry.get("title") or "GTA 6 Clip",
-                                "description": entry.get("description") or "",
-                            })
-                    if videos_to_process:
-                        break
-                except Exception as e:
-                    print(f"⚠️ Search error for '{query}': {e}")
-
-    if not videos_to_process:
-        print("ℹ️ No new unprocessed GTA 6 videos found.")
+    if not game_id:
+        print("❌ Could not resolve a Twitch game_id.")
         return
 
-    for video in videos_to_process:
-        vid = video["id"]
-        print(f"\n🎬 Evaluating: {video['title']} ({video['url']})")
-        category = classify_content(video["title"], video["description"])
-        title, description = generate_metadata(video["title"], category)
-        output_filename = f"gta6_{vid}_{category}.mp4"
+    clips = fetch_top_twitch_clips(twitch_client_id, token, game_id=game_id, limit=15)
+    new_clips = [c for c in clips if c.get("id") and c["id"] not in seen_ids]
+
+    if not new_clips:
+        print("ℹ️ No new unprocessed Twitch clips found.")
+        return
+
+    for clip in new_clips:
+        clip_id = clip["id"]
+        clip_url = clip.get("url") or f"https://clips.twitch.tv/{clip_id}"
+        clip_title = clip.get("title") or "GTA 6 Twitch Clip"
+        broadcaster = clip.get("broadcaster_name") or ""
+
+        print(f"\n🎮 Evaluating Twitch Clip: {clip_title} ({clip_url})")
+        category = classify_content(clip_title, broadcaster)
+        title, description = generate_metadata(clip_title, broadcaster, category)
+        output_filename = f"twitch_{clip_id}_{category}.mp4"
 
         print(f"🎯 Category: {category}")
         print(f"📝 Title: {title}")
-        print(f"🏷️ Description:\n{description}")
 
         try:
-            saved_path = download_and_trim_clip(video["url"], start_sec=10, end_sec=40, output_filename=output_filename)
+            saved_path = download_and_trim_clip(clip_url, output_filename=output_filename)
             upload_to_youtube(saved_path, title, description)
             upload_to_instagram(saved_path, description)
 
-            history.append(vid)
+            history.append(clip_id)
             save_history(history)
-            print("✨ Clip processed and saved successfully!")
+            print("✨ Twitch clip processed and saved successfully!")
             break
         except Exception as e:
-            print(f"❌ Failed on video {vid}: {e}")
+            print(f"❌ Failed on clip {clip_id}: {e}")
             continue
 
 
