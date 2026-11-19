@@ -39,11 +39,14 @@ jobs:
           pip install -U "yt-dlp[default]" google-genai requests
 
       - name: Create cookies.txt from GitHub Secret
-        if: ${{ secrets.YOUTUBE_COOKIES != '' }}
+        env:
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
         shell: bash
         run: |
-          printf "%s\n" "${{ secrets.YOUTUBE_COOKIES }}" > cookies.txt
-          chmod 600 cookies.txt
+          if [ -n "$YOUTUBE_COOKIES" ]; then
+            printf "%s\n" "$YOUTUBE_COOKIES" > cookies.txt
+            chmod 600 cookies.txt
+          fi
 
       - name: Ensure history file exists
         shell: bash
