@@ -43,8 +43,8 @@ VALID_CATEGORY_NAMES = list(CATEGORIES.keys())
 # ==========================================
 def get_cookie_opts() -> dict:
     """Returns yt-dlp cookiefile option only when cookies.txt exists and is non-empty."""
-    if os.path.exists(COOKIE_FILE) and os.path.getsize(YOUTUBE_COOKIE_FILE) > 0:
-        return {"cookiefile": YOUTUBE_COOKIE_FILE}
+    if os.path.exists(COOKIE_FILE) and os.path.getsize(COOKIE_FILE) > 0:
+        return {"cookiefile": COOKIE_FILE}
     return {}
 
 
